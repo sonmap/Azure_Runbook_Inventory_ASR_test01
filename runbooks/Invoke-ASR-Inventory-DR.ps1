@@ -7,7 +7,7 @@
   - Inventory CSV를 읽어서 Priority 순서대로 처리
   - AP VM 내부 Tomcat 기동 스크립트 실행
   - URL Health Check 수행
-  - Application Gateway Backend Pool 업데이트 예시 포함
+  - Traffic Manager DR Endpoint 활성화 예시 포함
 
 .PARAMETER InventoryUrl
   Storage Blob 또는 Git Raw URL 형태의 CSV 경로
@@ -30,12 +30,33 @@ function Write-Log {
     Write-Output "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] $Message"
 }
 
+function Convert-CustomParamToHash {
+    param([string]$CustomParam)
+
+    $kv = @{}
+    if ([string]::IsNullOrWhiteSpace($CustomParam)) {
+        return $kv
+    }
+
+    $CustomParam -split ';' | ForEach-Object {
+        $pair = $_ -split '=', 2
+        if ($pair.Count -eq 2) { $kv[$pair[0]] = $pair[1] }
+    }
+
+    return $kv
+}
+
 function Invoke-UrlHealthCheck {
     param(
         [string]$Url,
         [int]$RetryCount = 10,
         [int]$RetryIntervalSec = 30
     )
+
+    # Inventory placeholder가 남아 있으면 실수 방지용으로 실패 처리
+    if ($Url -like "*<*>") {
+        throw "HealthTarget contains placeholder. Update inventory first: $Url"
+    }
 
     for ($i = 1; $i -le $RetryCount; $i++) {
         try {
@@ -80,45 +101,37 @@ sudo bash $ScriptPath '$CustomParam'
     $result.Value.Message
 }
 
-function Update-AppGatewayBackendExample {
+function Enable-TrafficManagerDrEndpoint {
     param(
         [string]$ResourceGroupName,
-        [string]$AppGatewayName,
+        [string]$ProfileName,
         [string]$CustomParam
     )
 
-    # CustomParam 예: BACKEND_POOL=dr-ap-pool;BACKEND_IP=10.20.10.10
-    $kv = @{}
-    $CustomParam -split ';' | ForEach-Object {
-        $pair = $_ -split '=', 2
-        if ($pair.Count -eq 2) { $kv[$pair[0]] = $pair[1] }
+    # CustomParam 예: PROFILE=tm-asrtest01-tomcat-dr;DR_ENDPOINT=dr-japan-tomcat
+    $kv = Convert-CustomParamToHash -CustomParam $CustomParam
+    $endpointName = $kv["DR_ENDPOINT"]
+
+    if (-not $endpointName) {
+        throw "CustomParam must include DR_ENDPOINT"
     }
 
-    $backendPoolName = $kv["BACKEND_POOL"]
-    $backendIp       = $kv["BACKEND_IP"]
+    Write-Log "Enable Traffic Manager DR endpoint. Profile=$ProfileName Endpoint=$endpointName"
 
-    if (-not $backendPoolName -or -not $backendIp) {
-        throw "CustomParam must include BACKEND_POOL and BACKEND_IP"
-    }
-
-    Write-Log "Update Application Gateway backend. AGW=$AppGatewayName Pool=$backendPoolName IP=$backendIp"
-
-    $agw = Get-AzApplicationGateway `
-        -Name $AppGatewayName `
+    $profile = Get-AzTrafficManagerProfile `
+        -Name $ProfileName `
         -ResourceGroupName $ResourceGroupName
 
-    $pool = Get-AzApplicationGatewayBackendAddressPool `
-        -ApplicationGateway $agw `
-        -Name $backendPoolName
+    $endpoint = Get-AzTrafficManagerEndpoint `
+        -Name $endpointName `
+        -Type ExternalEndpoints `
+        -ProfileName $ProfileName `
+        -ResourceGroupName $ResourceGroupName
 
-    Set-AzApplicationGatewayBackendAddressPool `
-        -ApplicationGateway $agw `
-        -Name $backendPoolName `
-        -BackendIPAddresses $backendIp | Out-Null
+    $endpoint.EndpointStatus = "Enabled"
+    Set-AzTrafficManagerEndpoint -TrafficManagerEndpoint $endpoint | Out-Null
 
-    Set-AzApplicationGateway -ApplicationGateway $agw | Out-Null
-
-    Write-Log "Application Gateway backend update completed"
+    Write-Log "Traffic Manager DR endpoint enabled. FQDN=$($profile.RelativeDnsName).trafficmanager.net"
 }
 
 Write-Log "Runbook start"
@@ -156,10 +169,10 @@ foreach ($priority in $priorities) {
                 -ScriptPath $server.StartScript `
                 -CustomParam $server.CustomParam
         }
-        elseif ($server.StartMode -eq "custom" -and $server.StartScript -eq "Update-AppGateway-Backend") {
-            Update-AppGatewayBackendExample `
+        elseif ($server.StartMode -eq "custom" -and $server.StartScript -eq "Enable-TrafficManager-DR") {
+            Enable-TrafficManagerDrEndpoint `
                 -ResourceGroupName $server.ResourceGroup `
-                -AppGatewayName $server.VMName `
+                -ProfileName $server.VMName `
                 -CustomParam $server.CustomParam
         }
         elseif ($server.StartMode -eq "vm_only") {
