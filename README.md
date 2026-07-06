@@ -1,13 +1,15 @@
 # Azure Runbook + Inventory + ASR + Traffic Manager DR Test
 
-예제 목적: **서울 리전(Korea Central)의 AP 서버 1식(Tomcat) + Azure Database for MySQL Flexible Server** 구성을 **일본 리전(Japan East)** 으로 DR 전환하는 테스트 구조입니다.
+This repository provides a lab example for disaster recovery automation on Azure.
 
-Application Gateway는 실습 구독의 `Deny Expensive Network Resources` 정책으로 차단될 수 있으므로, 이 예제는 상단 진입점을 **Azure Traffic Manager**로 변경했습니다.
+The scenario is a **single AP server running Tomcat in Korea Central**, connected to **Azure Database for MySQL Flexible Server**, with DR failover to **Japan East** using **Azure Site Recovery (ASR)**. Because Application Gateway may be blocked by a lab policy such as `Deny Expensive Network Resources`, this version uses **Azure Traffic Manager** as the global DNS-based entry point.
 
-## 1. 구성 개요
+![ASR Runbook Traffic Manager Architecture](docs/images/asr-runbook-traffic-manager-architecture.svg)
+
+## 1. Architecture Overview
 
 ```text
-User PC
+User PC / Browser
   |
   v
 Traffic Manager DNS
@@ -22,41 +24,41 @@ Tomcat AP VM
 Azure Database for MySQL Flexible Server
 ```
 
-Traffic Manager는 L7 프록시가 아니라 **DNS 기반 글로벌 라우팅 서비스**입니다. 즉, Application Gateway처럼 HTTP Path Routing이나 Backend Pool L7 라우팅을 하지 않고, 장애 시 DNS 응답을 Primary에서 DR endpoint로 전환합니다.
+Traffic Manager is **not** a Layer 7 reverse proxy. It does not provide HTTP path routing or backend pool routing like Application Gateway. It provides **DNS-based global routing**, which is useful for DR failover from the primary endpoint to the DR endpoint.
 
-## 2. DR 전환 흐름
+## 2. DR Failover Flow
 
 ```text
-Korea Central 장애
+Korea Central outage
   |
   v
-ASR Recovery Plan 실행
+ASR Recovery Plan starts
   |
-  +-- AP VM을 Japan East로 Failover
+  +-- Fail over AP VM to Japan East
   |
-  +-- Azure Automation Runbook 실행
-  |     +-- inventory/dr-inventory.csv 읽기
-  |     +-- VM 기동 확인
-  |     +-- scripts/linux/start_tomcat.sh 실행
-  |     +-- Tomcat URL Health Check
+  +-- Execute Azure Automation Runbook
+  |     +-- Read inventory/dr-inventory.csv
+  |     +-- Confirm VM state
+  |     +-- Execute scripts/linux/start_tomcat.sh
+  |     +-- Run Tomcat health check
   |
-  +-- Traffic Manager DR endpoint 활성화
+  +-- Enable the Traffic Manager DR endpoint
   |
-  +-- 사용자 Tomcat 화면 테스트
+  +-- User validates the Tomcat test page
 ```
 
-## 3. 리전 설계
+## 3. Region Design
 
-| 구분 | Primary | DR |
+| Component | Primary | DR |
 |---|---|---|
 | Region | Korea Central | Japan East |
-| AP | VM + Tomcat + Public IP | ASR Failover VM + Public IP/DNS |
-| DB | Azure Database for MySQL Flexible Server | Geo-restore 또는 별도 DR MySQL |
-| Global Routing | Traffic Manager Priority 1 | Traffic Manager Priority 2 |
-| Automation | Azure Automation Runbook | 동일 또는 DR Automation Account |
-| Inventory | Storage/Git/CSV | 동일 CSV에 Environment=DR 사용 |
+| AP | VM + Tomcat + Public IP | ASR failover VM + Public IP or DNS |
+| Database | Azure Database for MySQL Flexible Server | Geo-restore, read replica, or separate DR MySQL plan |
+| Global routing | Traffic Manager Priority 1 | Traffic Manager Priority 2 |
+| Automation | Azure Automation Runbook | Same or DR Automation Account |
+| Inventory | Git, Storage, or CSV | Same CSV with `Environment=DR` |
 
-## 4. 폴더 구조
+## 4. Repository Structure
 
 ```text
 .
@@ -74,23 +76,25 @@ ASR Recovery Plan 실행
 │   └── tomcat-test/index.jsp
 ├── sql/
 │   └── init.sql
+├── docs/
+│   ├── commands-traffic-manager-runcommand.md
+│   └── images/
+│       └── asr-runbook-traffic-manager-architecture.svg
 └── terraform/
     ├── main.tf
     ├── variables.tf
     └── terraform.tfvars.example
 ```
 
-## 5. 사용자 PC에서 VM으로 shell 복사 방식 변경
+## 5. Why Run Command Is Used Instead of SCP
 
-Private IP만 있는 VM에는 사용자 PC에서 직접 `scp azureuser@10.x.x.x`가 불가능합니다.
-
-기존 방식:
+If the VM has only a private IP address, a user PC cannot directly run:
 
 ```bash
 scp scripts/linux/start_tomcat.sh azureuser@10.10.10.10:/tmp/
 ```
 
-변경 방식:
+This lab uses `az vm run-command` instead. The VM downloads the shell scripts from GitHub from inside Azure:
 
 ```bash
 az vm run-command invoke \
@@ -105,7 +109,7 @@ sudo chmod +x /opt/runbook/*.sh
 "
 ```
 
-JSP 배포도 동일하게 Run Command를 사용합니다.
+The JSP test page is also deployed by Run Command:
 
 ```bash
 az vm run-command invoke \
@@ -115,12 +119,12 @@ az vm run-command invoke \
   --scripts "
 sudo mkdir -p /var/lib/tomcat10/webapps/tomcat-test
 sudo curl -L -o /var/lib/tomcat10/webapps/tomcat-test/index.jsp https://raw.githubusercontent.com/sonmap/Azure_Runbook_Inventory_ASR_test01/main/app/tomcat-test/index.jsp
-sudo systemctl restart tomcat10
+sudo systemctl restart tomcat10 || sudo systemctl restart tomcat
 curl -I http://127.0.0.1:8080/tomcat-test/index.jsp
 "
 ```
 
-## 6. Terraform 실행
+## 6. Terraform Deployment
 
 ```bash
 cd terraform
@@ -131,13 +135,13 @@ terraform plan
 terraform apply
 ```
 
-`terraform output`으로 접속 정보를 확인합니다.
+Check the outputs:
 
 ```bash
 terraform output
 ```
 
-예상 출력:
+Expected outputs:
 
 ```text
 primary_vm_public_ip = "x.x.x.x"
@@ -145,32 +149,33 @@ primary_vm_fqdn      = "asrtest01-prd-ap-krc.koreacentral.cloudapp.azure.com"
 traffic_manager_fqdn = "tm-asrtest01-tomcat-dr.trafficmanager.net"
 ```
 
-## 7. Traffic Manager 테스트
+## 7. Traffic Manager Test
 
 ```bash
 curl -I http://$(terraform output -raw traffic_manager_fqdn):8080/tomcat-test/index.jsp
 ```
 
-또는 브라우저에서:
+Browser test:
 
 ```text
 http://<traffic_manager_fqdn>:8080/tomcat-test/index.jsp
 ```
 
-## 8. 핵심 원칙
+## 8. Main Components
 
-| 영역 | 역할 |
+| Component | Role |
 |---|---|
-| ASR Recovery Plan | VM Failover 순서 제어 |
-| Inventory CSV | 어떤 서버를 어떤 스크립트로 기동/점검할지 정의 |
-| Azure Runbook | Inventory를 읽고 VM 내부 스크립트 실행 |
-| Linux Script | Tomcat 실제 기동 및 Health Check |
-| Traffic Manager | Primary/DR DNS 기반 전환 |
-| MySQL Flexible Server | 업무 데이터 저장 |
+| ASR Recovery Plan | Controls VM failover order |
+| Inventory CSV | Defines target servers, script paths, health checks, and priorities |
+| Azure Automation Runbook | Reads the inventory and executes VM internal scripts |
+| Linux shell scripts | Start Tomcat and run local checks |
+| Traffic Manager | Provides DNS-based primary/DR routing |
+| Azure Database for MySQL Flexible Server | Stores application data |
 
-## 9. 주의 사항
+## 9. Important Notes
 
-- 이 저장소는 실습용 예제입니다. 운영 적용 전 NSG, Private Endpoint, Key Vault, Managed Identity RBAC, 인증서, DNS 전환, MySQL DR 정책을 반드시 보강해야 합니다.
-- MySQL Flexible Server는 VM처럼 ASR로 복제하지 않습니다. DB는 geo-redundant backup 기반 geo-restore, read replica, 백업/복구 정책 등 별도 DR 전략이 필요합니다.
-- Runbook에서 VM 내부 명령을 실행하려면 VM Agent가 정상이어야 하며, Automation Account Managed Identity에 VM 권한이 필요합니다.
-- Traffic Manager는 DNS 기반이므로 TTL, 클라이언트 DNS 캐시, 장애 감지 주기에 따라 전환 시간이 달라질 수 있습니다.
+- This is a lab example. Before production use, harden NSG rules, Private Endpoints, Key Vault, Managed Identity RBAC, certificates, DNS, and MySQL DR design.
+- Azure Database for MySQL Flexible Server is not replicated by ASR like a VM. Use geo-redundant backup, geo-restore, read replica, or another database DR strategy.
+- Azure Automation Runbook requires a working VM Agent to execute commands inside the VM.
+- The Automation Account managed identity needs permission to run commands on the VM and update Traffic Manager endpoints.
+- Traffic Manager is DNS-based. Failover time depends on TTL, client DNS cache, and probe behavior.
