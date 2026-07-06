@@ -1,0 +1,15 @@
+CREATE DATABASE IF NOT EXISTS appdb;
+
+CREATE USER IF NOT EXISTS 'appuser'@'%' IDENTIFIED BY 'ChangeMe_Use_KeyVault_123!';
+GRANT ALL PRIVILEGES ON appdb.* TO 'appuser'@'%';
+FLUSH PRIVILEGES;
+
+USE appdb;
+
+CREATE TABLE IF NOT EXISTS health_check (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  message VARCHAR(200) NOT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+INSERT INTO health_check(message) VALUES ('Azure ASR Tomcat MySQL DR test initialized');
