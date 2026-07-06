@@ -1,0 +1,11 @@
+location_primary = "koreacentral"
+location_dr      = "japaneast"
+prefix           = "asrtest01"
+admin_username   = "azureuser"
+
+# Replace with your actual SSH public key
+admin_ssh_public_key = "ssh-rsa AAAA..."
+
+# Do not commit real password. Use Key Vault or environment variable in production.
+mysql_admin_user     = "mysqladmin"
+mysql_admin_password = "ChangeMe_Use_KeyVault_123!"
